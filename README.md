@@ -2,7 +2,7 @@
 The purpose of this document is to demonstrate the use of regularised regression methods in constructing Markowitz Global Minimum Variance (GMV) Portfolios. Traditionally, GMV portfolios are constructed by solving a quadratic optimisation problem. However, there are two issues with this: (1) when the estimated variance-covariance matrix is non-singular, the quadratic optimisation problem cannot be solved using the usual method, (2) when the portfolio constructed is large, the estimation error of the variance-covariance will be large. These issues can be resolved using a regularised regression approach. By reframing the portfolio optimisation problem into a regression problem, we are able to make use of the many efficient regression solving algorithms to work around the problem of high dimensionality. Even when the estimated variance-covariance matrix is non-singular, these the regression constructed portfolios are able to attain lower risk profiles than both the traditional GMV portfolio and the equally weighted portfolio.
 
 # Dependencies
-(1) MASS
+\n(1) MASS
 (2) quadprog
 (3) LiblineaR
 (4) quantreg
