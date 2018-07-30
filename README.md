@@ -20,6 +20,6 @@ The purpose of this document is to demonstrate the use of regularised regression
 
 # Additional
 The full report can be found at https://drive.google.com/open?id=1Rzy1evMI74zJvo5c_6RndMpP4hciftks
-Note that some of the .r files used in the full report is not produced above. They are omitted because:
+<br />Note that some of the .r files used in the full report is not produced above. They are omitted because:
 <br />(1) they are very similar to the file produced above, with only slight modifications,
 <br />(2) they contain simple plotting functions.
