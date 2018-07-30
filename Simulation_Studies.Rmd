@@ -1,0 +1,848 @@
+---
+title: "Simulation for 500 Assets"
+author: "Jeremiah"
+date: "08 May 2018"
+output: pdf_document
+---
+
+# This RMD file documents the code for the analysis of the simulated returns data using 500 assets.
+
+```{r setup, include=FALSE}
+# Set working directory
+wd = "C:/Users/Michael Tay/Desktop/Project"
+# Load libraries and functions
+source(paste0(wd,"/functionlist.r"))
+library(MASS)
+library(LiblineaR)
+library(rqPen)
+library(quadprog)
+library(glmnet)
+library(beepr)
+```
+
+## Define Experiment Parameters
+
+```{r}
+n.sim = 500 # Number of simulations
+n = 252 # Number of data points i.e. trading days
+p1 = 200 # Number of assets for non-degenerate case
+p2 = 500 # Number of assets for degenerate case
+train.portion = 11/12
+test.portion = 1/12
+train.size = ceiling(n*train.portion)
+test.size = floor(n*test.portion)
+```
+
+## Generate Returns Data
+### Generate 500 independent sets of returns data for non-degenerate (p=200) and degenerate cases (p=500) with n = 252. We store them and read them later on for convenience. The generate returns and covariance matrix of each simulation is appended to the bottom of the previous simulation in the following order: Returns of simulation 1, Variance of simulation 1, Returns of simlation 2, variance of simulation 2, ...
+### For example, returns of simulation 1 will be stored from (1,1) to (n,p), variance of simulation 1 will be stored in (n+1,1) to (n+p, p)
+
+### WARNING: Do not run if data has been previously generated.
+
+```{r}
+simdat500 = NULL
+for(i in 1:n.sim){  
+  sim.i = ff_ret(n, p2)
+  ret = sim.i[[1]] # returns data
+  varcov = sim.i[[2]] # Var cov
+  comb = rbind(ret, varcov)
+  simdat500 = rbind(simdat500, comb)
+}
+write.csv(simdat500, paste0(wd,"/SimData/simdat500.csv", row.names = F))
+
+```
+
+## Load Data
+### Read data generated from previous session
+```{r}
+simdat500 = read.csv(paste0(wd,"/SimData/simdat500.csv"))
+```
+
+## Initialise arrays to store interested values
+
+```{r}
+# Initialise arrays to store the portfolio expected returns
+eret.orc = numeric(n.sim)
+eret.gmv = numeric(n.sim)
+eret.eq = numeric(n.sim)
+eret.svr11 = matrix(numeric(100*n.sim), 100, n.sim)
+eret.svr13 = matrix(numeric(100*n.sim), 100, n.sim)
+eret.q25 = matrix(numeric(40*n.sim), 40, n.sim)
+eret.q50 = matrix(numeric(40*n.sim), 40, n.sim)
+eret.q75 = matrix(numeric(40*n.sim), 40, n.sim)
+eret.ls = matrix(numeric(100*n.sim), 100, n.sim)
+
+# Initialise arrays to store max and min weights
+minw.orc = numeric(n.sim)
+maxw.orc = numeric(n.sim)
+minw.gmv = numeric(n.sim)
+maxw.gmv = numeric(n.sim)
+minw.svr11 = matrix(numeric(100*n.sim), 100, n.sim)
+maxw.svr11 = matrix(numeric(100*n.sim), 100, n.sim)
+minw.svr13 = matrix(numeric(100*n.sim), 100, n.sim)
+maxw.svr13 = matrix(numeric(100*n.sim), 100, n.sim)
+minw.q25 = matrix(numeric(40*n.sim), 40, n.sim)
+maxw.q25 = matrix(numeric(40*n.sim), 40, n.sim)
+minw.q50 = matrix(numeric(40*n.sim), 40, n.sim)
+maxw.q50 = matrix(numeric(40*n.sim), 40, n.sim)
+minw.q75 = matrix(numeric(40*n.sim), 40, n.sim)
+maxw.q75 = matrix(numeric(40*n.sim), 40, n.sim)
+minw.ls = matrix(numeric(100*n.sim), 100, n.sim)
+maxw.ls = matrix(numeric(100*n.sim), 100, n.sim)
+
+# Initialise arrays to store number of long and short positions
+long.orc = numeric(n.sim)
+short.orc = numeric(n.sim)
+long.gmv = numeric(n.sim)
+short.gmv = numeric(n.sim)
+long.svr11 = matrix(numeric(100*n.sim), 100, n.sim)
+short.svr11 = matrix(numeric(100*n.sim), 100, n.sim)
+long.svr13 = matrix(numeric(100*n.sim), 100, n.sim)
+short.svr13 = matrix(numeric(100*n.sim), 100, n.sim)
+long.q25 = matrix(numeric(40*n.sim), 40, n.sim)
+short.q25 = matrix(numeric(40*n.sim), 40, n.sim)
+long.q50 = matrix(numeric(40*n.sim), 40, n.sim)
+short.q50 = matrix(numeric(40*n.sim), 40, n.sim)
+long.q75 = matrix(numeric(40*n.sim), 40, n.sim)
+short.q75 = matrix(numeric(40*n.sim), 40, n.sim)
+long.ls = matrix(numeric(100*n.sim), 100, n.sim)
+short.ls = matrix(numeric(100*n.sim), 100, n.sim)
+
+# Initialise matrix to store gross exposure contraint
+exp.svr11 = matrix(numeric(100*n.sim), 100, n.sim)
+exp.svr13 = matrix(numeric(100*n.sim), 100, n.sim)
+exp.q25 = matrix(numeric(40*n.sim), 40, n.sim)
+exp.q50 = matrix(numeric(40*n.sim), 40, n.sim)
+exp.q75 = matrix(numeric(40*n.sim), 40, n.sim)
+exp.ls = matrix(numeric(100*n.sim), 100, n.sim)
+```
+
+## Construct Portfolios (Oracle, GMV, Equally Weighted, SVR11, SVR13)
+### First analyse data for p = 500
+
+```{r}
+for(i in 1:n.sim){
+  sim.i = simdat500[((i-1)*(n+p2)+1):(i*(n+p2)), ]
+  ret = sim.i[1:n, ] # returns data
+  varcov = as.matrix(sim.i[(n+1):(n+p2), ]) # Var cov
+
+  # Split into training and testing dataset
+  train = ret[1:train.size,]
+  test = ret[(train.size+1):nrow(ret),]
+  eret = matrix(apply(test, 2, mean), p2, 1) # Expected returns of test data
+  tret = (apply(as.matrix(test)/100 + 1, 2, prod) - 1)*100
+  
+  # Learning Phase ####
+  
+  ## Oracle portfolio weights ####
+  w.orc = (solve(varcov)%*%matrix(rep(1,p2),p2,1))/sum(solve(varcov)%*%matrix(rep(1,p2),p2,1))
+  eret.orc[i] = tret %*% w.orc
+  minw.orc[i] = min(w.orc)
+  maxw.orc[i] = max(w.orc)
+  long.orc[i] = sum(w.orc > 0)
+  short.orc[i] = sum(w.orc < 0)
+  
+  ## Compute Estimated Covariance Matrices from train sets
+  ### Sample Covariance
+  sc = var(train)
+
+  ## GMV Portfolio doesn't exist for degenerate p=500 case
+  ### Instead we use the Generalised Inverse
+  w.gmv = (ginv(sc)%*%matrix(rep(1,p2),p2,1))/sum(ginv(sc)%*%matrix(rep(1,p2),p2,1))
+  eret.gmv[i] = tret %*% w.gmv
+  minw.gmv[i] = min(w.gmv)
+  maxw.gmv[i] = max(w.gmv)
+  long.gmv[i] = sum(w.gmv > 0)
+  short.gmv[i] = sum(w.gmv < 0)
+
+
+  ## Equally Weighted Porfolio
+  w.eq = matrix(rep(1/p2, p2), p2, 1)
+  eret.eq[i] = tret %*% w.eq
+
+  
+  ## Using SVR ####
+  #### Put training returns data into appropriate regression form
+  mydat = trans.phi(train)
+  y = mydat$Y
+  x = as.matrix(mydat[,2:ncol(mydat)])
+  
+  ### Support Vector Regression LiblineaR - L2-reg, L2-loss (Primal) --> svr11
+  ### Test SVR-11 model
+  testc = seq(0.00003, 0.3, length = 100)
+  for(j in 1:length(testc)){
+    svr11 = LiblineaR(x, y, type = 11, cost = testc[j], epsilon = 0.01, bias = TRUE, svr_eps = sd(y))
+    w.svr11_pm1 = svr11$W[-length(svr11$W)]  # Remove intercept coefficient
+    # All weights of magnitude under the threshold 0.001 are considered negligible and excluded
+    w.svr11_pm1[abs(w.svr11_pm1) < 0.001] = 0
+    # The optimal weights does not include the weight of asset p
+    w.svr11_p = 1 - sum(w.svr11_pm1)
+    w.svr11 = matrix(c(w.svr11_pm1, w.svr11_p), p2, 1)
+    
+    # Gross Exposure
+    exp.svr11[j, i] = sum(abs(w.svr11))
+    # Porfolio return
+    eret.svr11[j, i] =  tret %*% w.svr11
+    # Store min and max weights
+    minw.svr11[j, i] = min(w.svr11)
+    maxw.svr11[j, i] = max(w.svr11)
+    # Store  number of short and long positions
+    long.svr11[j, i] = sum(w.svr11 > 0)
+    short.svr11[j, i] = sum(w.svr11 < 0)
+  }
+
+  ### Support Vector Regression LiblineaR - L2-reg, L1-loss (Dual) --> svr13
+  ### Test SVR-13 model
+  for(j in 1:length(testc)){
+    svr13 = LiblineaR(x, y, type = 13, cost = testc[j], epsilon = 0.01, bias = TRUE, svr_eps = sd(y))
+    w.svr13_pm1 = svr13$W[-length(svr13$W)]  # Remove intercept coefficient
+    # All weights of magnitude under the threshold 0.001 are considered negligible and excluded
+    w.svr13_pm1[abs(w.svr13_pm1) < 0.001] = 0
+    # The optimal weights does not include the weight of asset p
+    w.svr13_p = 1 - sum(w.svr13_pm1)
+    w.svr13 = matrix(c(w.svr13_pm1, w.svr13_p), p2, 1)
+    
+    # Gross Exposure
+    exp.svr13[j, i] = sum(abs(w.svr13))
+    # Porfolio return
+    eret.svr13[j, i] =  tret %*% w.svr13
+    # All weights of magnitude under the threshold 0.001 are considered negligible and excluded
+    w.svr13[abs(w.svr13) < 0.001] = 0
+    # Store min and max weights
+    minw.svr13[j, i] = min(w.svr13)
+    maxw.svr13[j, i] = max(w.svr13)
+    # Store  number of short and long positions
+    long.svr13[j, i] = sum(w.svr13 > 0)
+    short.svr13[j, i] = sum(w.svr13 < 0)
+  }
+    if(i %in% seq(50, 450, 50)){
+    print(paste("Progress...", paste0(i/50,"/10")))
+  }
+}
+beep(8)
+print("Complete!")
+```
+
+## Compute Key features of Results from Simulation Studies
+### First save the results of the mean returns, SD, Sharpe ratio, Max weight, Min weight and the number of long and short positions from the 500 simulations
+
+```{r}
+muret.orc = mean(eret.orc)
+musd.orc = sd(eret.orc)
+sharpe.orc = muret.orc/musd.orc
+mumaxw.orc = mean(maxw.orc)
+muminw.orc = mean(minw.orc)
+mulong.orc = round(mean(long.orc))
+mushort.orc = round(mean(short.orc))
+write.csv(muret.orc, paste0(wd,"/p500 Results 4/muretorc.csv"), row.names = F)
+write.csv(musd.orc, paste0(wd,"/p500 Results 4/musdorc.csv"), row.names = F)
+write.csv(sharpe.orc, paste0(wd,"/p500 Results 4/sharpeorc.csv"), row.names = F)
+write.csv(mumaxw.orc, paste0(wd,"/p500 Results 4/mumaxworc.csv"), row.names = F)
+write.csv(muminw.orc, paste0(wd,"/p500 Results 4/muminworc.csv"), row.names = F)
+write.csv(mulong.orc, paste0(wd,"/p500 Results 4/mulongorc.csv"), row.names = F)
+write.csv(mushort.orc, paste0(wd,"/p500 Results 4/mushortorc.csv"), row.names = F)
+
+muret.gmv = mean(eret.gmv)
+musd.gmv = sd(eret.gmv)
+sharpe.gmv = muret.gmv/musd.gmv
+mumaxw.gmv = mean(maxw.gmv)
+muminw.gmv = mean(minw.gmv)
+mulong.gmv = round(mean(long.gmv))
+mushort.gmv = round(mean(short.gmv))
+write.csv(muret.gmv, paste0(wd,"/p500 Results 4/muretgmv.csv"), row.names = F)
+write.csv(musd.gmv, paste0(wd,"/p500 Results 4/musdgmv.csv"), row.names = F)
+write.csv(sharpe.gmv, paste0(wd,"/p500 Results 4/sharpegmv.csv"), row.names = F)
+write.csv(mumaxw.gmv, paste0(wd,"/p500 Results 4/mumaxwgmv.csv"), row.names = F)
+write.csv(muminw.gmv, paste0(wd,"/p500 Results 4/muminwgmv.csv"), row.names = F)
+write.csv(mulong.gmv, paste0(wd,"/p500 Results 4/mulonggmv.csv"), row.names = F)
+write.csv(mushort.gmv, paste0(wd,"/p500 Results 4/mushortgmv.csv"), row.names = F)
+
+muret.eq = mean(eret.eq)
+musd.eq = sd(eret.eq)
+sharpe.eq = muret.eq/musd.eq
+write.csv(muret.eq, paste0(wd,"/p500 Results 4/mureteq.csv"), row.names = F)
+write.csv(musd.eq, paste0(wd,"/p500 Results 4/musdeq.csv"), row.names = F)
+write.csv(sharpe.eq, paste0(wd,"/p500 Results 4/sharpeeq.csv"), row.names = F)
+
+muret.svr11 = apply(eret.svr11, 1, mean)
+musd.svr11 = apply(eret.svr11, 1, sd)
+sharpe.svr11 = muret.svr11/musd.svr11
+mumaxw.svr11 = apply(maxw.svr11, 1, mean)
+muminw.svr11 = apply(minw.svr11, 1, mean)
+mulong.svr11 = round(apply(long.svr11, 1, mean))
+mushort.svr11 = round(apply(short.svr11, 1, mean))
+muexp.svr11 = apply(exp.svr11, 1, mean)
+write.csv(muexp.svr11, paste0(wd,"/p500 Results 4/muexpsvr11.csv"), row.names = F)
+write.csv(muret.svr11, paste0(wd,"/p500 Results 4/muretsvr11.csv"), row.names = F)
+write.csv(musd.svr11, paste0(wd,"/p500 Results 4/musdsvr11.csv"), row.names = F)
+write.csv(sharpe.svr11, paste0(wd,"/p500 Results 4/sharpesvr11.csv"), row.names = F)
+write.csv(mumaxw.svr11, paste0(wd,"/p500 Results 4/mumaxwsvr11.csv"), row.names = F)
+write.csv(muminw.svr11, paste0(wd,"/p500 Results 4/muminwsvr11.csv"), row.names = F)
+write.csv(mulong.svr11, paste0(wd,"/p500 Results 4/mulongsvr11.csv"), row.names = F)
+write.csv(mushort.svr11, paste0(wd,"/p500 Results 4/mushortsvr11.csv"), row.names = F)
+
+muret.svr13 = apply(eret.svr13, 1, mean)
+musd.svr13 = apply(eret.svr13, 1, sd)
+sharpe.svr13 = muret.svr13/musd.svr13
+mumaxw.svr13 = apply(maxw.svr13, 1, mean)
+muminw.svr13 = apply(minw.svr13, 1, mean)
+mulong.svr13 = round(apply(long.svr13, 1, mean))
+mushort.svr13 = round(apply(short.svr13, 1, mean))
+muexp.svr13 = apply(exp.svr13, 1, mean)
+write.csv(muexp.svr13, paste0(wd,"/p500 Results 4/muexpsvr13.csv"), row.names = F)
+write.csv(muret.svr13, paste0(wd,"/p500 Results 4/muretsvr13.csv"), row.names = F)
+write.csv(musd.svr13, paste0(wd,"/p500 Results 4/musdsvr13.csv"), row.names = F)
+write.csv(sharpe.svr13, paste0(wd,"/p500 Results 4/sharpesvr13.csv"), row.names = F)
+write.csv(mumaxw.svr13, paste0(wd,"/p500 Results 4/mumaxwsvr13.csv"), row.names = F)
+write.csv(muminw.svr13, paste0(wd,"/p500 Results 4/muminwsvr13.csv"), row.names = F)
+write.csv(mulong.svr13, paste0(wd,"/p500 Results 4/mulongsvr13.csv"), row.names = F)
+write.csv(mushort.svr13, paste0(wd,"/p500 Results 4/mushortsvr13.csv"), row.names = F)
+```
+## Load data from previous session
+```{r}
+muret.eq = read.csv(paste0(wd,"/p500 Results 4/mureteq.csv"))[[1]]
+musd.eq = read.csv(paste0(wd,"/p500 Results 4/musdeq.csv"))[[1]]
+sharpe.eq = read.csv(paste0(wd,"/p500 Results 4/sharpeeq.csv"))[[1]]
+
+muret.orc = read.csv(paste0(wd,"/p500 Results 4/muretorc.csv"))[[1]]
+musd.orc = read.csv(paste0(wd,"/p500 Results 4/musdorc.csv"))[[1]]
+sharpe.orc = read.csv(paste0(wd,"/p500 Results 4/sharpeorc.csv"))[[1]]
+mumaxw.orc = read.csv(paste0(wd,"/p500 Results 4/mumaxworc.csv"))[[1]]
+muminw.orc = read.csv(paste0(wd,"/p500 Results 4/muminworc.csv"))[[1]]
+mulong.orc = read.csv(paste0(wd,"/p500 Results 4/mulongorc.csv"))[[1]]
+mushort.orc = read.csv(paste0(wd,"/p500 Results 4/mushortorc.csv"))[[1]]
+
+muret.gmv = read.csv(paste0(wd,"/p500 Results 4/muretgmv.csv"))[[1]]
+musd.gmv = read.csv(paste0(wd,"/p500 Results 4/musdgmv.csv"))[[1]]
+sharpe.gmv = read.csv(paste0(wd,"/p500 Results 4/sharpegmv.csv"))[[1]]
+mumaxw.gmv = read.csv(paste0(wd,"/p500 Results 4/mumaxwgmv.csv"))[[1]]
+muminw.gmv = read.csv(paste0(wd,"/p500 Results 4/muminwgmv.csv"))[[1]]
+mulong.gmv = read.csv(paste0(wd,"/p500 Results 4/mulonggmv.csv"))[[1]]
+mushort.gmv = read.csv(paste0(wd,"/p500 Results 4/mushortgmv.csv"))[[1]]
+
+muret.svr11 = read.csv(paste0(wd,"/p500 Results 4/muretsvr11.csv"))[[1]]
+musd.svr11 = read.csv(paste0(wd,"/p500 Results 4/musdsvr11.csv"))[[1]]
+sharpe.svr11 = read.csv(paste0(wd,"/p500 Results 4/sharpesvr11.csv"))[[1]]
+mumaxw.svr11 = read.csv(paste0(wd,"/p500 Results 4/mumaxwsvr11.csv"))[[1]]
+muminw.svr11 = read.csv(paste0(wd,"/p500 Results 4/muminwsvr11.csv"))[[1]]
+mulong.svr11 = read.csv(paste0(wd,"/p500 Results 4/mulongsvr11.csv"))[[1]]
+mushort.svr11 = read.csv(paste0(wd,"/p500 Results 4/mushortsvr11.csv"))[[1]]
+muexp.svr11 =  read.csv(paste0(wd,"/p500 Results 4/muexpsvr11.csv"))[[1]]
+
+muret.svr13 = read.csv(paste0(wd,"/p500 Results 4/muretsvr13.csv"))[[1]]
+musd.svr13 = read.csv(paste0(wd,"/p500 Results 4/musdsvr13.csv"))[[1]]
+sharpe.svr13 = read.csv(paste0(wd,"/p500 Results 4/sharpesvr13.csv"))[[1]]
+mumaxw.svr13 = read.csv(paste0(wd,"/p500 Results 4/mumaxwsvr13.csv"))[[1]]
+muminw.svr13 = read.csv(paste0(wd,"/p500 Results 4/muminwsvr13.csv"))[[1]]
+mulong.svr13 = read.csv(paste0(wd,"/p500 Results 4/mulongsvr13.csv"))[[1]]
+mushort.svr13 = read.csv(paste0(wd,"/p500 Results 4/mushortsvr13.csv"))[[1]]
+muexp.svr13 =  read.csv(paste0(wd,"/p500 Results 4/muexpsvr13.csv"))[[1]]
+```
+
+
+### Relationship between the regularisation parameter c, gross exposure constraint and number of stocks selected
+```{r}
+##### SVR11
+testc = seq(0.00003, 0.3, length = 100)
+plot(testc, muexp.svr11, type = "l", xlab = "Regularisation Parameter", ylab = "Gross Exposure", main = "L2 Reg L2 Loss SVR")
+plot(testc, mulong.svr11+mushort.svr11, type = "l", xlab = "Regularisation Parameter", ylab = "Number of Stocks", main = "L2 Reg L2 Loss SVR")
+#### SVR13
+plot(testc, muexp.svr13, type = "l", xlab = "Regularisation Parameter", ylab = "Gross Exposure", main = "L2 Reg L1 Loss SVR")
+plot(testc, mulong.svr13+mushort.svr13, type = "l", xlab = "Regularisation Parameter", ylab = "Number of Stocks", main = "L2 Reg L1 Loss SVR")
+```
+
+## Analysis of Results from Simulation Studies
+### We are interest in the features of 5 selected values of c i.e. c = 0.0005, 0.005, 0.01, 0.05, 0.1
+### We look at the mean returns, SD, Sharpe ratio, Max weight, Min weight and the number of long and short positions from the 500 simulations of the Oracle portfolio
+```{r}
+print(muret.orc)
+print(musd.orc)
+print(sharpe.orc)
+print(mumaxw.orc)
+print(muminw.orc)
+print(mulong.orc)
+print(mushort.orc)
+```
+
+## Analysis of Results from Simulation Studies with SVR 11
+### We look at the mean returns, SD, Sharpe ratio, Max weight, Min weight and the number of long and short positions from the 500 simulations
+### The gross exposures will not be exactly 1, 1.5, 2 ,etc. but they will be very close.
+```{r}
+paste(muexp.svr11[1], muexp.svr11[100])
+c1 = which(abs(muexp.svr11 - 1) == min(abs(muexp.svr11 - 1)))
+c1.5 = which(abs(muexp.svr11 - 1.5) == min(abs(muexp.svr11 - 1.5)))
+c2 = which(abs(muexp.svr11 - 2) == min(abs(muexp.svr11 - 2)))
+ind = c(c1, c1.5, c2)
+testc[ind]
+muret.svr11x = muret.svr11[ind]
+musd.svr11x = musd.svr11[ind]
+sharpe.svr11x = sharpe.svr11[ind]
+mumaxw.svr11x = mumaxw.svr11[ind]
+muminw.svr11x = muminw.svr11[ind]
+mulong.svr11x = mulong.svr11[ind]
+mushort.svr11x = mushort.svr11[ind]
+print(muret.svr11x)
+print(musd.svr11x)
+print(sharpe.svr11x)
+print(mumaxw.svr11x)
+print(muminw.svr11x)
+print(mulong.svr11x)
+print(mushort.svr11x)
+```
+
+## Analysis of Results from Simulation Studies with SVR 13
+### We look at the mean returns, SD, Sharpe ratio, Max weight, Min weight and the number of long and short positions from the 500 simulations
+```{r}
+paste(muexp.svr13[1], muexp.svr13[100])
+c1 = which(abs(muexp.svr11 - 1) == min(abs(muexp.svr11 - 1)))
+c1.5 = which(abs(muexp.svr11 - 1.5) == min(abs(muexp.svr11 - 1.5)))
+c2 = which(abs(muexp.svr11 - 2) == min(abs(muexp.svr11 - 2)))
+ind2 = c(c1, c1.5, c2)
+testc[ind2]
+muret.svr13x = muret.svr13[ind2]
+musd.svr13x = musd.svr13[ind2]
+sharpe.svr13x = sharpe.svr13[ind2]
+mumaxw.svr13x = mumaxw.svr13[ind2]
+muminw.svr13x = muminw.svr13[ind2]
+mulong.svr13x = mulong.svr13[ind2]
+mushort.svr13x = mushort.svr13[ind2]
+print(muret.svr13x)
+print(musd.svr13x)
+print(sharpe.svr13x)
+print(mumaxw.svr13x)
+print(muminw.svr13x)
+print(mulong.svr13x)
+print(mushort.svr13x)
+```
+
+
+## Analysis of Results from Simulation Studies with GMV
+### We look at the mean returns, SD, Sharpe ratio, Max weight, Min weight and the number of long and short positions from the 500 simulations
+```{r}
+print(muret.gmv)
+print(musd.gmv)
+print(sharpe.gmv)
+print(mumaxw.gmv)
+print(muminw.gmv)
+print(mulong.gmv)
+print(mushort.gmv)
+```
+
+## Analysis of Results from Simulation Studies with Equally Weighted Portfolio
+### We look at the mean returns, SD, Sharpe ratio, Max weight, Min weight and the number of long and short positions from the 500 simulations
+```{r}
+print(muret.eq)
+print(musd.eq)
+print(sharpe.eq)
+```
+
+## Construct Portfolios (L1 Regularized Quantile Regression) for p = 500
+
+```{r}
+for(i in 1:n.sim){
+  sim.i = simdat500[((i-1)*(n+p2)+1):(i*(n+p2)), ]
+  ret = sim.i[1:n, ] # returns data
+  varcov = as.matrix(sim.i[(n+1):(n+p2), ]) # Var cov
+  
+  # Split into training and testing dataset
+  train = ret[1:train.size,]
+  test = ret[(train.size+1):nrow(ret),]
+  eret = matrix(apply(test, 2, mean), p2, 1) # Expected returns of test data
+  tret = (apply(as.matrix(test)/100 + 1, 2, prod) - 1)*100
+    
+  # Learning Phase ####
+
+  ## Using Quantile Regression ####
+  #### Put training returns data into appropriate regression form
+  mydat = trans.phi(train)
+  y = mydat$Y
+  x = as.matrix(mydat[,2:ncol(mydat)])
+  
+  ### Lasso Penalized Quantile Regression using rqPen
+  ### Test Quantile model - 50% Quantile
+  #### Dithering the response variable is frequently a useful option in quantile regression fitting to avoid deleterious effects of degenerate solutions     (Machado and Santos Silva, 2005)
+  testlam = seq(0.01, 0.2, length = 40)
+  for(j in 1:length(testlam)){
+    y50 = y # Dither y50 instead of the actual vector y
+    q50 = NULL
+    while(is.null(q50)){
+      try({q50 = LASSO.fit(y50, x, tau = .5, lambda = testlam[j], intercept = TRUE, coef.cutoff = 1e-03)}, silent = T)
+      if(is.null(q50)) y50 = dither(y, type = "symmetric", value = 0.0001)
+    }
+    # The optimal weights does not include the weight of asset p
+    w.q50_p = 1 - sum(q50[2:length(q50)]) # First coef is the intercept
+    w.q50 = matrix(c(q50[2:length(q50)], w.q50_p), p2, 1)
+    # Store gross exposure
+    exp.q50[j, i] = sum(abs(w.q50))
+    # Porfolio return
+    eret.q50[j, i] =  tret %*% w.q50
+    # Store min and max weights
+    minw.q50[j, i] = min(w.q50)
+    maxw.q50[j, i] = max(w.q50)
+    # Store  number of short and long positions
+    long.q50[j, i] = sum(w.q50 > 0)
+    short.q50[j, i] = sum(w.q50 < 0)
+  }
+  
+  ### Test Quantile model - 25% Quantile
+  for(j in 1:length(testlam)){
+    y25 = y # Dither y25 instead of the actual vector y
+    q25 = NULL
+    while(is.null(q25)){
+      try({q25 = LASSO.fit(y25, x, tau = .25, lambda = testlam[j], intercept = TRUE, coef.cutoff = 1e-03)}, silent = T)
+      if(is.null(q25)) y25 = dither(y25, type = "symmetric", value = 0.0001)
+    }
+    # The optimal weights does not include the weight of asset p
+    w.q25_p = 1 - sum(q25[2:length(q25)])
+    w.q25 = matrix(c(q25[2:length(q25)], w.q25_p), p2, 1)
+    # Store gross exposure
+    exp.q25[j, i] = sum(abs(w.q25))
+    # Porfolio return
+    eret.q25[j, i] =   tret %*% w.q25
+    # Store min and max weights
+    minw.q25[j, i] = min(w.q25)
+    maxw.q25[j, i] = max(w.q25)
+    # Store  number of short and long positions
+    long.q25[j, i] = sum(w.q25 > 0)
+    short.q25[j, i] = sum(w.q25 < 0)
+  }
+    
+  ### Test Quantile model - 75% Quantile
+  for(j in 1:length(testlam)){
+    y75 = y # Dither y75 instead of the actual vector y
+    q75 = NULL
+    while(is.null(q75)){
+      try({q75 = LASSO.fit(y75, x, tau = .75, lambda = testlam[j], intercept = TRUE, coef.cutoff = 1e-03)}, silent = T)
+      if(is.null(q75)) y75 = dither(y75, type = "symmetric", value = 0.0001)
+    }
+    # The optimal weights does not include the weight of asset p
+    w.q75_p = 1 - sum(q75[2:length(q75)])
+    w.q75 = matrix(c(q75[2:length(q75)], w.q75_p), p2, 1)
+    # Store gross exposure
+    exp.q75[j, i] = sum(abs(w.q75))
+    # Porfolio return
+    eret.q75[j, i] =   tret %*% w.q75
+    # Store min and max weights
+    minw.q75[j, i] = min(w.q75)
+    maxw.q75[j, i] = max(w.q75)
+    # Store  number of short and long positions
+    long.q75[j, i] = sum(w.q75 > 0)
+    short.q75[j, i] = sum(w.q75 < 0)
+   }
+  if(i %in% seq(50, 450, 50)){
+    print(paste("Progress...", paste0(i/50,"/10")))
+  }
+}
+beep(8)
+print("Complete!")
+```
+
+
+## Save Results
+```{r}
+muret.q50 = apply(eret.q50x, 1, mean)
+musd.q50 = apply(eret.q50x, 1, sd)
+sharpe.q50 = muret.q50/musd.q50
+mumaxw.q50 = apply(maxw.q50x, 1, mean)
+muminw.q50 = apply(minw.q50x, 1, mean)
+mulong.q50 = round(apply(long.q50x, 1, mean))
+mushort.q50 = round(apply(short.q50x, 1, mean))
+muexp.q50 = apply(exp.q50x, 1, mean)
+write.csv(muexp.q50, paste0(wd,"/p500 Results 4/muexpq502.csv"), row.names = F)
+write.csv(muret.q50, paste0(wd,"/p500 Results 4/muretq502.csv"), row.names = F)
+write.csv(musd.q50, paste0(wd,"/p500 Results 4/musdq502.csv"), row.names = F)
+write.csv(sharpe.q50, paste0(wd,"/p500 Results 4/sharpeq502.csv"), row.names = F)
+write.csv(mumaxw.q50, paste0(wd,"/p500 Results 4/mumaxwq502.csv"), row.names = F)
+write.csv(muminw.q50, paste0(wd,"/p500 Results 4/muminwq502.csv"), row.names = F)
+write.csv(mulong.q50, paste0(wd,"/p500 Results 4/mulongq502.csv"), row.names = F)
+write.csv(mushort.q50, paste0(wd,"/p500 Results 4/mushortq502.csv"), row.names = F)
+
+muret.q25 = apply(eret.q25x, 1, mean)
+musd.q25 = apply(eret.q25x, 1, sd)
+sharpe.q25 = muret.q25/musd.q25
+mumaxw.q25 = apply(maxw.q25x, 1, mean)
+muminw.q25 = apply(minw.q25x, 1, mean)
+mulong.q25 = round(apply(long.q25x, 1, mean))
+mushort.q25 = round(apply(short.q25x, 1, mean))
+muexp.q25 = apply(exp.q25x, 1, mean)
+write.csv(muexp.q25, paste0(wd, "/p500 Results 4/muexpq252.csv"), row.names = F)
+write.csv(muret.q25, paste0(wd,"/p500 Results 4/muretq252.csv"), row.names = F)
+write.csv(musd.q25, paste0(wd,"/p500 Results 4/musdq252.csv"), row.names = F)
+write.csv(sharpe.q25, paste0(wd,"/p500 Results 4/sharpeq252.csv"), row.names = F)
+write.csv(mumaxw.q25, paste0(wd,"/p500 Results 4/mumaxwq252.csv"), row.names = F)
+write.csv(muminw.q25, paste0(wd,"/p500 Results 4/muminwq252.csv"), row.names = F)
+write.csv(mulong.q25, paste0(wd,"/p500 Results 4/mulongq252.csv"), row.names = F)
+write.csv(mushort.q25, paste0(wd,"/p500 Results 4/mushortq252.csv"), row.names = F)
+
+muret.q75 = apply(eret.q75, 1, mean)
+musd.q75 = apply(eret.q75, 1, sd)
+sharpe.q75 = muret.q75/musd.q75
+mumaxw.q75 = apply(maxw.q75, 1, mean)
+muminw.q75 = apply(minw.q75, 1, mean)
+mulong.q75 = round(apply(long.q75, 1, mean))
+mushort.q75 = round(apply(short.q75, 1, mean))
+muexp.q75 = apply(exp.q75, 1, mean)
+write.csv(muexp.q75, paste0(wd, "/p500 Results 4/muexpq752.csv"), row.names = F)
+write.csv(muret.q75, paste0(wd,"/p500 Results 4/muretq752.csv"), row.names = F)
+write.csv(musd.q75, paste0(wd,"/p500 Results 4/musdq752.csv"), row.names = F)
+write.csv(sharpe.q75, paste0(wd,"/p500 Results 4/sharpeq752.csv"), row.names = F)
+write.csv(mumaxw.q75, paste0(wd,"/p500 Results 4/mumaxwq752.csv"), row.names = F)
+write.csv(muminw.q75, paste0(wd,"/p500 Results 4/muminwq752.csv"), row.names = F)
+write.csv(mulong.q75, paste0(wd,"/p500 Results 4/mulongq752.csv"), row.names = F)
+write.csv(mushort.q75, paste0(wd,"/p500 Results 4/mushortq752.csv"), row.names = F)
+```
+
+## Load data
+```{r}
+# q50
+muret.q50 = read.csv(paste0(wd,"/p500 Results 4/muretq50.csv"))[[1]]
+musd.q50 = read.csv(paste0(wd,"/p500 Results 4/musdq50.csv"))[[1]]
+sharpe.q50 = read.csv(paste0(wd,"/p500 Results 4/sharpeq50.csv"))[[1]]
+mumaxw.q50 = read.csv(paste0(wd,"/p500 Results 4/mumaxwq50.csv"))[[1]]
+muminw.q50 = read.csv(paste0(wd,"/p500 Results 4/muminwq50.csv"))[[1]]
+mulong.q50 = read.csv(paste0(wd,"/p500 Results 4/mulongq50.csv"))[[1]]
+mushort.q50 = read.csv(paste0(wd,"/p500 Results 4/mushortq50.csv"))[[1]]
+muexp.q50 = read.csv(paste0(wd,"/p500 Results 4/muexpq50.csv"))[[1]]
+
+# q25
+muret.q25 = read.csv(paste0(wd,"/p500 Results 4/muretq25.csv"))[[1]]
+musd.q25 = read.csv(paste0(wd,"/p500 Results 4/musdq25.csv"))[[1]]
+sharpe.q25 = read.csv(paste0(wd,"/p500 Results 4/sharpeq25.csv"))[[1]]
+mumaxw.q25 = read.csv(paste0(wd,"/p500 Results 4/mumaxwq25.csv"))[[1]]
+muminw.q25 = read.csv(paste0(wd,"/p500 Results 4/muminwq25.csv"))[[1]]
+mulong.q25 = read.csv(paste0(wd,"/p500 Results 4/mulongq25.csv"))[[1]]
+mushort.q25 = read.csv(paste0(wd,"/p500 Results 4/mushortq25.csv"))[[1]]
+muexp.q25 = read.csv(paste0(wd,"/p500 Results 4/muexpq25.csv"))[[1]]
+
+# q75
+muret.q75 = read.csv(paste0(wd,"/p500 Results 4/muretq75.csv"))[[1]]
+musd.q75 = read.csv(paste0(wd,"/p500 Results 4/musdq75.csv"))[[1]]
+sharpe.q75 = read.csv(paste0(wd,"/p500 Results 4/sharpeq75.csv"))[[1]]
+mumaxw.q75 = read.csv(paste0(wd,"/p500 Results 4/mumaxwq75.csv"))[[1]]
+muminw.q75 = read.csv(paste0(wd,"/p500 Results 4/muminwq75.csv"))[[1]]
+mulong.q75 = read.csv(paste0(wd,"/p500 Results 4/mulongq75.csv"))[[1]]
+mushort.q75 = read.csv(paste0(wd,"/p500 Results 4/mushortq75.csv"))[[1]]
+muexp.q75 = read.csv(paste0(wd,"/p500 Results 4/muexpq75.csv"))[[1]]
+```
+
+### Relationship between the regularisation parameter c, gross exposure constraint and number of stocks selected
+```{r}
+#### q50
+testlam = seq(0.01, 0.2, length = 40)
+plot(testlam, muexp.q50, type = "l", xlab = "Regularisation Parameter", ylab = "Gross Exposure", main = "L1 Reg Quantile Regression, tau = 0.5")
+plot(testlam, mulong.q50+mushort.q50, type = "l", xlab = "Regularisation Parameter", ylab = "Number of stocks", main = "L1 Reg Quantile Regression, tau = 0.5")
+##### q25
+plot(testlam, muexp.q25, type = "l", xlab = "Regularisation Parameter", ylab = "Gross Exposure", main = "L1 Reg Quantile Regression, tau = 0.25")
+plot(testlam, mulong.q25+mushort.q25, type = "l", xlab = "Regularisation Parameter", ylab = "Number of stocks", main = "L1 Reg Quantile Regression, tau = 0.25")
+##### q25
+plot(testlam, muexp.q75, type = "l", xlab = "Regularisation Parameter", ylab = "Gross Exposure", main = "L1 Reg Quantile Regression, tau = 0.75")
+plot(testlam, mulong.q75+mushort.q75, type = "l", xlab = "Regularisation Parameter", ylab = "Number of stocks", main = "L1 Reg Quantile Regression, tau = 0.75")
+```
+
+## Analysis of Results from Simulation Studies with quantile regression, Q50
+### We look at the mean returns, SD, Sharpe ratio, Max weight, Min weight and the number of long and short positions from the 500 simulations
+```{r}
+# q50
+testlam = seq(0.01, 0.2, length = 40)
+paste(muexp.q50[1], muexp.q50[40])
+c1 = which(abs(muexp.q50 - 1) == min(abs(muexp.q50 - 1)))
+c1.5 = which(abs(muexp.q50 - 1.5) == min(abs(muexp.q50 - 1.5)))
+c2 = which(abs(muexp.q50 - 2) == min(abs(muexp.q50 - 2)))
+c2.5 = which(abs(muexp.q50 - 2.5) == min(abs(muexp.q50 - 2.5)))
+c3 = which(abs(muexp.q50 - 3) == min(abs(muexp.q50 - 3)))
+c3.5 = which(abs(muexp.q50 - 3.5) == min(abs(muexp.q50 - 3.5)))
+ind2 = c(c1, c1.5, c2, c2.5, c3, c3.5)
+muexp.q50[ind2]
+muret.q50x = muret.q50[ind2]
+musd.q50x = musd.q50[ind2]
+sharpe.q50x = sharpe.q50[ind2]
+mumaxw.q50x = mumaxw.q50[ind2]
+muminw.q50x = muminw.q50[ind2]
+mulong.q50x = mulong.q50[ind2]
+mushort.q50x = mushort.q50[ind2]
+print(muret.q50x)
+print(musd.q50x)
+print(sharpe.q50x)
+print(mumaxw.q50x)
+print(muminw.q50x)
+print(mulong.q50x)
+print(mushort.q50x)
+```
+
+
+## Analysis of Results from Simulation Studies with quantile regression, Q25
+### We look at the mean returns, SD, Sharpe ratio, Max weight, Min weight and the number of long and short positions from the 500 simulations
+```{r}
+# q25
+testlam = seq(0.01, 0.2, length = 40)
+paste(muexp.q25[1], muexp.q25[40])
+c1 = which(abs(muexp.q25 - 1) == min(abs(muexp.q25 - 1)))
+c1.5 = which(abs(muexp.q25 - 1.5) == min(abs(muexp.q25 - 1.5)))
+c2 = which(abs(muexp.q25 - 2) == min(abs(muexp.q25 - 2)))
+c2.5 = which(abs(muexp.q25 - 2.5) == min(abs(muexp.q25 - 2.5)))
+c3 = which(abs(muexp.q25 - 3) == min(abs(muexp.q25 - 3)))
+c3.5 = which(abs(muexp.q25 - 3.5) == min(abs(muexp.q25 - 3.5)))
+ind2 = c(c1, c1.5, c2, c2.5, c3, c3.5)
+muexp.q25[ind2]
+muret.q25x = muret.q25[ind2]
+musd.q25x = musd.q25[ind2]
+sharpe.q25x = sharpe.q25[ind2]
+mumaxw.q25x = mumaxw.q25[ind2]
+muminw.q25x = muminw.q25[ind2]
+mulong.q25x = mulong.q25[ind2]
+mushort.q25x = mushort.q25[ind2]
+print(muret.q25x)
+print(musd.q25x)
+print(sharpe.q25x)
+print(mumaxw.q25x)
+print(muminw.q25x)
+print(mulong.q25x)
+print(mushort.q25x)
+```
+
+## Analysis of Results from Simulation Studies with quantile regression, Q75
+### We look at the mean returns, SD, Sharpe ratio, Max weight, Min weight and the number of long and short positions from the 500 simulations
+```{r}
+# q75
+testlam = seq(0.01, 0.2, length = 40)
+paste(muexp.q75[1], muexp.q75[40])
+c1 = which(abs(muexp.q75 - 1) == min(abs(muexp.q75 - 1)))
+c1.5 = which(abs(muexp.q75 - 1.5) == min(abs(muexp.q75 - 1.5)))
+c2 = which(abs(muexp.q75 - 2) == min(abs(muexp.q75 - 2)))
+c2.5 = which(abs(muexp.q75 - 2.5) == min(abs(muexp.q75 - 2.5)))
+c3 = which(abs(muexp.q75 - 3) == min(abs(muexp.q75 - 3)))
+c3.5 = which(abs(muexp.q75 - 3.5) == min(abs(muexp.q75 - 3.5)))
+ind2 = c(c1, c1.5, c2, c2.5, c3, c3.5)
+muexp.q75[ind2]
+muret.q75x = muret.q75[ind2]
+musd.q75x = musd.q75[ind2]
+sharpe.q75x = sharpe.q75[ind2]
+mumaxw.q75x = mumaxw.q75[ind2]
+muminw.q75x = muminw.q75[ind2]
+mulong.q75x = mulong.q75[ind2]
+mushort.q75x = mushort.q75[ind2]
+print(muret.q75x)
+print(musd.q75x)
+print(sharpe.q75x)
+print(mumaxw.q75x)
+print(muminw.q75x)
+print(mulong.q75x)
+print(mushort.q75x)
+```
+
+## Construct Portfolios (L1 Regularized Regression - LASSO) for p = 500
+```{r}
+for(i in 1:n.sim){
+  sim.i = simdat500[((i-1)*(n+p2)+1):(i*(n+p2)), ]
+  ret = sim.i[1:n, ] # returns data
+  varcov = as.matrix(sim.i[(n+1):(n+p2), ]) # Var cov
+  
+  # Split into training and testing dataset
+  train = ret[1:train.size,]
+  test = ret[(train.size+1):nrow(ret),]
+  eret = matrix(apply(test, 2, mean), p2, 1) # Expected returns of test data
+  tret = (apply(as.matrix(test)/100 + 1, 2, prod) - 1)*100
+  
+  # Learning Phase ####
+
+  ## Using LASSO Regression ####
+  #### Put training returns data into appropriate regression form
+  mydat = trans.phi(train)
+  y = mydat$Y
+  x = as.matrix(mydat[,2:ncol(mydat)])
+  
+  ### Lasso Regression
+  testlam = 10^seq(-3, 0.1, length = 100)
+  ls.net = glmnet(x, y, alpha = 1, lambda = testlam)
+  ls = coef(ls.net)
+  for(j in 1:length(testlam)){
+    w.ls_pm1.temp = ls[ ,j]
+    w.ls_pm1 = w.ls_pm1.temp[2:length(w.ls_pm1.temp)] # First asset is the intercept
+    w.ls_p = 1 - sum(w.ls_pm1)
+    w.ls = matrix(c(w.ls_pm1, w.ls_p), p2, 1)
+    # Store gross exposure
+    exp.ls[j, i] = sum(abs(w.ls))
+    # Porfolio return
+    eret.ls[j, i] =   tret %*% w.ls
+    # Store min and max weights
+    minw.ls[j, i] = min(w.ls)
+    maxw.ls[j, i] = max(w.ls)
+    # Store  number of short and long positions
+    long.ls[j, i] = sum(w.ls > 0)
+    short.ls[j, i] = sum(w.ls < 0)
+  }
+  if(i %in% seq(50, 450, 50)){
+      print(paste("Progress...", paste0(i/50,"/10")))
+    }
+}
+beep(8)
+print("Complete!")
+```
+
+## Save Results
+```{r}
+muret.ls = apply(eret.ls, 1, mean)
+musd.ls = apply(eret.ls, 1, sd)
+sharpe.ls = muret.ls/musd.ls
+mumaxw.ls = apply(maxw.ls, 1, mean)
+muminw.ls = apply(minw.ls, 1, mean)
+mulong.ls = round(apply(long.ls, 1, mean))
+mushort.ls = round(apply(short.ls, 1, mean))
+muexp.ls = apply(exp.ls, 1, mean)
+write.csv(muexp.ls, paste0(wd, "/p500 Results 4/muexpls.csv"), row.names = F)
+write.csv(muret.ls, paste0(wd, "/p500 Results 4/muretls.csv"), row.names = F)
+write.csv(musd.ls, paste0(wd, "/p500 Results 4/musdls.csv"), row.names = F)
+write.csv(sharpe.ls, paste0(wd, "/p500 Results 4/sharpels.csv"), row.names = F)
+write.csv(mumaxw.ls, paste0(wd, "/p500 Results 4/mumaxwls.csv"), row.names = F)
+write.csv(muminw.ls, paste0(wd, "/p500 Results 4/muminwls.csv"), row.names = F)
+write.csv(mulong.ls, paste0(wd, "/p500 Results 4/mulongls.csv"), row.names = F)
+write.csv(mushort.ls, paste0(wd, "/p500 Results 4/mushortls.csv"), row.names = F)
+```
+
+## Load data
+```{r}
+# LASSO
+muret.ls = read.csv(paste0(wd,"/p500 Results 4/muretls.csv"))[[1]]
+musd.ls = read.csv(paste0(wd,"/p500 Results 4/musdls.csv"))[[1]]
+sharpe.ls = read.csv(paste0(wd,"/p500 Results 4/sharpels.csv"))[[1]]
+mumaxw.ls = read.csv(paste0(wd,"/p500 Results 4/mumaxwls.csv"))[[1]]
+muminw.ls = read.csv(paste0(wd,"/p500 Results 4/muminwls.csv"))[[1]]
+mulong.ls = read.csv(paste0(wd,"/p500 Results 4/mulongls.csv"))[[1]]
+mushort.ls = read.csv(paste0(wd,"/p500 Results 4/mushortls.csv"))[[1]]
+muexp.ls = read.csv(paste0(wd,"/p500 Results 4/muexpls.csv"))[[1]]
+```
+
+### Relationship between the regularisation parameter c, gross exposure constraint and number of stocks selected
+```{r}
+#### LASSO
+testlam = rev(10^seq(-3, 0.1, length = 100))
+plot(testlam, muexp.ls, type = "l", xlab = "Regularisation Parameter", ylab = "Gross Exposure", main = "LASSO Regression")
+plot(testlam, mulong.ls+mushort.ls, type = "l", xlab = "Regularisation Parameter", ylab = "Number of stocks", main = "LASSO Regression")
+```
+
+## Analysis of Results from Simulation Studies with L1 Regularised Regression - LASSO
+### We look at the mean returns, SD, Sharpe ratio, Max weight, Min weight and the number of long and short positions from the 500 simulations
+```{r}
+paste(muexp.ls[1], muexp.ls[83])
+c1 = 17 + which(abs(muexp.ls - 1) == min(abs(muexp.ls - 1)))[1]
+c1.5 = which(abs(muexp.ls - 1.5) == min(abs(muexp.ls - 1.5)))
+c2 = which(abs(muexp.ls - 2) == min(abs(muexp.ls - 2)))
+c2.5 = which(abs(muexp.ls - 2.5) == min(abs(muexp.ls - 2.5)))
+c3 = which(abs(muexp.ls - 3) == min(abs(muexp.ls - 3)))
+ind = c(c1, c1.5, c2, c2.5, c3)
+muexp.ls[ind]
+muret.lsx = muret.ls[ind]
+musd.lsx = musd.ls[ind]
+sharpe.lsx = sharpe.ls[ind]
+mumaxw.lsx = mumaxw.ls[ind]
+muminw.lsx = muminw.ls[ind]
+mulong.lsx = mulong.ls[ind]
+mushort.lsx = mushort.ls[ind]
+print(muret.lsx)
+print(musd.lsx)
+print(sharpe.lsx)
+print(mumaxw.lsx)
+print(muminw.lsx)
+print(mulong.lsx)
+print(mushort.lsx)
+```
